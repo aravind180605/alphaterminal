@@ -9,27 +9,29 @@ import yfinance as yf
 import requests
 import streamlit as st
 
-# ==================== PAGE & RESPONSIVE SETUP ====================
+# ==================== STREAMLIT CONFIGURATION ====================
 st.set_page_config(
-    page_title="AlphaTerminal Ultra | Action Desk",
+    page_title="AlphaTerminal Ultra | Live Market Engine",
     page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
+# Dark institutional style
 st.markdown("""
 <style>
     .stApp { background-color: #080c14; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     div[data-testid="stMetric"] { background-color: #111827; padding: 10px; border-radius: 8px; border: 1px solid #1f2937; }
-    .action-box { background-color: #0c1a2e; border: 2px solid #2563eb; border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+    .action-box { background-color: #0c1a2e; border: 2px solid #2563eb; border-radius: 10px; padding: 14px; margin-bottom: 12px; }
     .exit-box { background-color: #3b0712; border: 1px solid #ef4444; border-radius: 8px; padding: 8px 12px; margin-top: 8px; font-size: 12px; color: #fca5a5; }
-    .news-card { background-color: #0f172a; border: 1px solid #1e293b; border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+    .news-card { background-color: #0f172a; border: 1px solid #1e293b; border-radius: 8px; padding: 12px; margin-bottom: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
 TRADE_LOG_FILE = "daily_trades.json"
 IST = pytz.timezone("Asia/Kolkata")
 
+# High-Velocity Liquid Indian Market Radar
 DEFAULT_MOMENTUM_WATCHLIST = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS",
     "BHARTIARTL.NS", "TATAMOTORS.NS", "LT.NS", "SBIN.NS", "BAJFINANCE.NS",
@@ -38,13 +40,25 @@ DEFAULT_MOMENTUM_WATCHLIST = [
     "TRENT.NS", "ADANIENT.NS", "COALINDIA.NS", "POWERGRID.NS", "VEDL.NS"
 ]
 
-# State for clicked stock news
-if "selected_news_stock" not in st.session_state:
-    st.session_state.selected_news_stock = None
-
+# Dual Persistence Session State
 if "trade_ledger" not in st.session_state:
     st.session_state.trade_ledger = []
+if "selected_news_symbol" not in st.session_state:
+    st.session_state.selected_news_symbol = "NSE India"
 
+# ==================== DATA CLEANER & NORMALIZER ====================
+def clean_candle_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalizes multi-index levels and column names safely."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    d = df.copy()
+    if isinstance(d.columns, pd.MultiIndex):
+        d.columns = [str(c[0]).lower() for c in d.columns]
+    else:
+        d.columns = [str(c).lower() for c in d.columns]
+    return d.dropna(how="all")
+
+# ==================== AUDIT LEDGER ====================
 def load_trade_log():
     today = datetime.now(IST).strftime("%Y-%m-%d")
     if os.path.exists(TRADE_LOG_FILE):
@@ -91,7 +105,7 @@ def update_session_audit(quotes):
         sym = trade.get("symbol", "") + ".NS"
         if sym in quotes and trade.get("status") == "OPEN":
             df = quotes[sym]
-            if not df.empty and "high" in df.columns:
+            if not df.empty and "high" in df.columns and "low" in df.columns:
                 max_high = float(df["high"].max())
                 min_low = float(df["low"].min())
                 target_val = trade.get("target_1", trade.get("entry", 0.0))
@@ -117,15 +131,7 @@ def update_session_audit(quotes):
             pass
     return trades
 
-def clean_candle_data(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [col[0].lower() for col in df.columns]
-    else:
-        df.columns = [str(c).lower() for c in df.columns]
-    return df.dropna(how="all")
-
+# ==================== QUANTITATIVE SIGNAL ENGINE ====================
 def analyze_stock(df: pd.DataFrame, nifty_df: pd.DataFrame, capital: float, max_risk: float):
     df = clean_candle_data(df)
     if len(df) < 15 or "close" not in df.columns:
@@ -156,6 +162,7 @@ def analyze_stock(df: pd.DataFrame, nifty_df: pd.DataFrame, capital: float, max_
     kc_upper = float(ema_20 + (1.5 * atr))
     vol_sma = float(volume.rolling(min(20, len(volume))).mean().iloc[-1]) if len(volume) >= 5 else curr_vol
 
+    # Relative Alpha vs Nifty 50
     lookback = min(15, len(close) - 1)
     stock_ret = (curr_close - float(close.iloc[-lookback])) / max(float(close.iloc[-lookback]), 1e-4)
     if not nifty_df.empty and "close" in nifty_df.columns:
@@ -211,6 +218,7 @@ def analyze_stock(df: pd.DataFrame, nifty_df: pd.DataFrame, capital: float, max_
         "exit_rule": f"Exit immediately if 15m candle closes below ₹{stop_loss} or if target of ₹{target_1} is reached."
     }
 
+# ==================== DATA DOWNLOADERS ====================
 @st.cache_data(ttl=25, show_spinner=False)
 def fetch_market_quotes(tickers_tuple: tuple):
     tickers_list = list(tickers_tuple)
@@ -222,22 +230,32 @@ def fetch_market_quotes(tickers_tuple: tuple):
     except Exception:
         return None
 
-@st.cache_data(ttl=300, show_spinner=False)
+def fetch_single_ticker(symbol: str):
+    clean_sym = symbol.strip().upper()
+    if not clean_sym.endswith(".NS") and not clean_sym.endswith(".BO"):
+        clean_sym += ".NS"
+    try:
+        df = yf.download(clean_sym, period="5d", interval="15m", progress=False)
+        if df is None or df.empty:
+            df = yf.download(clean_sym, period="1mo", interval="1d", progress=False)
+        return clean_candle_data(df), clean_sym
+    except Exception:
+        return pd.DataFrame(), clean_sym
+
+# ==================== LIVE NEWS RETRIEVER ====================
+@st.cache_data(ttl=180, show_spinner=False)
 def fetch_company_news(query_symbol="NSE India"):
     clean_query = query_symbol.replace(".NS", "").replace(".BO", "").strip()
-    encoded_query = requests.utils.quote(f"{clean_query} stock market India")
-    rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-IN&gl=IN&ceid=IN:en"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-    
+    encoded = requests.utils.quote(f"{clean_query} stock market India")
+    rss_url = f"https://news.google.com/rss/search?q={encoded}&hl=en-IN&gl=IN&ceid=IN:en"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
     articles = []
     try:
         res = requests.get(rss_url, headers=headers, timeout=4)
         if res.status_code == 200:
             root = ET.fromstring(res.content)
-            for item in root.findall(".//item")[:8]:
+            for item in root.findall(".//item")[:10]:
                 title = item.find("title").text if item.find("title") is not None else "Update"
                 link = item.find("link").text if item.find("link") is not None else "#"
                 pub_date = item.find("pubDate").text if item.find("pubDate") is not None else ""
@@ -245,8 +263,25 @@ def fetch_company_news(query_symbol="NSE India"):
                 articles.append({"title": title, "link": link, "date": pub_date[:16], "source": source})
     except Exception:
         pass
+
+    if not articles:
+        try:
+            ticker_obj = yf.Ticker(f"{clean_query}.NS")
+            raw_news = ticker_obj.news
+            if raw_news:
+                for n in raw_news[:8]:
+                    content = n.get("content", n)
+                    articles.append({
+                        "title": content.get("title", "Market Update"),
+                        "link": content.get("canonicalUrl", {}).get("url", n.get("link", "#")),
+                        "date": content.get("pubDate", "")[:16],
+                        "source": content.get("provider", {}).get("displayName", "Yahoo Finance")
+                    })
+        except Exception:
+            pass
     return articles
 
+# ==================== F&O DERIVATIVE ENGINE ====================
 def fetch_fno_chain(symbol="NIFTY"):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -314,12 +349,12 @@ def fetch_fno_chain(symbol="NIFTY"):
         exit_rule = f"⚡ Fast Exit: Sell immediately if {symbol} Spot breaks above ₹{call_wall} resistance, or if premium drops to ₹{stop_loss_rate}."
     else:
         bias = "RANGEBOUND"
-        contract = "AVOID NAKED OPTION BUYING"
+        contract = "AVOID NAKED CALL/PUT (Use Spreads)"
         est_entry_rate = 0.0
         stop_loss_rate = 0.0
         target_rate = 0.0
         approx_profit_lot = 0.0
-        exit_rule = "⚡ Market is choppy. Close open long options fast before theta decay sets in."
+        exit_rule = "⚡ Market is choppy. Close long options fast before theta decay sets in."
 
     return {
         "spot": spot, "expiry": curr_expiry, "pcr": pcr, "bias": bias,
@@ -336,9 +371,9 @@ RISK_PERCENT = st.sidebar.slider("Risk Per Trade (%)", min_value=0.5, max_value=
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔍 Universal Indian Stock Finder")
 user_custom_symbol = st.sidebar.text_input(
-    "Analyze ANY NSE/BSE Stock",
-    placeholder="e.g. TATAPOWER, IREDA, SUZLON",
-    help="Type any symbol to scan and fetch news."
+    "Scan ANY NSE/BSE Stock Instantly",
+    placeholder="e.g. TATAPOWER, IREDA, SUZLON, 500325",
+    help="Type any symbol or security code to evaluate and pull news."
 ).strip().upper()
 
 AUTO_REFRESH_SEC = st.sidebar.selectbox("Real-Time Refresh Interval", [15, 30, 60], index=1)
@@ -347,7 +382,7 @@ SIMULATION_MODE = st.sidebar.checkbox("Force Live Market Mode (Off-Hours Test)",
 MAX_RISK_RUPEES = USER_CAPITAL * (RISK_PERCENT / 100.0)
 st.sidebar.info(f"🛡️ **Max Risk Limit / Trade:** ₹{MAX_RISK_RUPEES:,.2f}")
 
-st.title("⚡ AlphaTerminal Action Desk: Equities & F&O")
+st.title("⚡ AlphaTerminal Action Desk: Live Equities & F&O")
 
 # ==================== REAL-TIME FRAGMENT ENGINE ====================
 @st.fragment(run_every=f"{AUTO_REFRESH_SEC}s")
@@ -413,30 +448,68 @@ def render_live_desk():
         m4.metric("Put Support Wall", f"₹{fno_data['put_wall']}")
 
     # ===== TAB 2: EQUITIES ACTION RADAR =====
-    active_symbols = list(DEFAULT_MOMENTUM_WATCHLIST)
-    if user_custom_symbol:
-        custom_formatted = user_custom_symbol if ("." in user_custom_symbol) else f"{user_custom_symbol}.NS"
-        if custom_formatted not in active_symbols:
-            active_symbols.insert(0, custom_formatted)
-
     with tabs[1]:
         c1, c2 = st.columns([2, 1])
         with c1:
-            st.subheader(f"Equity Breakout Box ({len(active_symbols)} Stocks Tracked)")
+            st.subheader(f"Equity Action Radar ({len(DEFAULT_MOMENTUM_WATCHLIST)} Momentum Stocks)")
         with c2:
             filter_mode = st.selectbox("Display Filter", ["Show All Analyzed Stocks", "Show STRONG BUY Setups Only"], index=0)
 
-        batch_raw = fetch_market_quotes(tuple(active_symbols + ["^NSEI"]))
-        results = []
-        quotes_cache = {}
-
+        # 1. On-Demand Custom Stock Finder Box
         nifty_df = pd.DataFrame()
+        batch_raw = fetch_market_quotes(tuple(DEFAULT_MOMENTUM_WATCHLIST + ["^NSEI"]))
         if batch_raw is not None and "^NSEI" in getattr(batch_raw.columns, "levels", [[]])[0]:
             nifty_df = clean_candle_data(batch_raw["^NSEI"])
 
+        if user_custom_symbol:
+            st.markdown(f"#### 🔍 Custom Stock Analysis: `{user_custom_symbol}`")
+            single_df, formatted_sym = fetch_single_ticker(user_custom_symbol)
+            if not single_df.empty:
+                custom_res = analyze_stock(single_df, nifty_df, USER_CAPITAL, MAX_RISK_RUPEES)
+                if custom_res:
+                    custom_res["symbol"] = user_custom_symbol
+                    is_buy = custom_res["signal"] == "STRONG BUY"
+                    box_border = "#059669" if is_buy else "#374151"
+                    box_bg = "#064e3b22" if is_buy else "#111827"
+                    status_color = "#34d399" if is_buy else "#9ca3af"
+
+                    st.markdown(f"""
+                    <div style="background-color:{box_bg}; border:2px solid {box_border}; border-radius:10px; padding:12px; margin-bottom:14px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <b style="font-size:20px; color:{status_color};">BUY {custom_res['symbol']}</b>
+                            <span style="font-size:12px; font-weight:bold; background-color:{box_border}; color:#fff; padding:3px 8px; border-radius:4px;">{custom_res['signal']}</span>
+                        </div>
+                        <div style="font-size:14px; color:#cbd5e1; margin-top:4px;">
+                            AT RATE: <b style="color:#fff;">₹{custom_res['price']}</b> | RECOMMENDED QTY: <b style="color:#38bdf8;">{custom_res['trade_qty']} shares</b>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    c_col1, c_col2 = st.columns(2)
+                    c_col1.metric("🛑 Stop-Loss", f"₹{custom_res['stop_loss']}")
+                    c_col1.metric("🎯 Target 1", f"₹{custom_res['target_1']}")
+                    c_col2.metric("🚀 Max Target", f"₹{custom_res['max_upside']}")
+                    c_col2.metric("📈 Gain Room", f"+{custom_res['upside_pct']}%")
+
+                    st.markdown(f"""
+                    <div class="exit-box">
+                        <b>⚡ WHEN TO SELL FAST:</b> {custom_res['exit_rule']}
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    if st.button(f"📰 Read {custom_res['symbol']} News Now", key="btn_custom_news"):
+                        st.session_state.selected_news_symbol = custom_res["symbol"]
+            else:
+                st.warning(f"Could not retrieve live candles for '{user_custom_symbol}'. Ensure the symbol is spelled correctly (e.g., TATAPOWER, SUZLON, IREDA).")
+            st.divider()
+
+        # 2. Momentum Basket Scanner
+        results = []
+        quotes_cache = {}
+
         if batch_raw is not None:
             has_levels = hasattr(batch_raw.columns, "levels") and len(batch_raw.columns.levels) > 0
-            for ticker in active_symbols:
+            for ticker in DEFAULT_MOMENTUM_WATCHLIST:
                 try:
                     df = pd.DataFrame()
                     if has_levels and ticker in batch_raw.columns.levels[0]:
@@ -476,7 +549,6 @@ def render_live_desk():
                 col = cols[idx % 3]
                 with col:
                     with st.container(border=True):
-                        # Action Indicating Box
                         is_buy = res["signal"] == "STRONG BUY"
                         box_border = "#059669" if is_buy else "#374151"
                         box_bg = "#064e3b22" if is_buy else "#111827"
@@ -495,34 +567,31 @@ def render_live_desk():
                         </div>
                         """, unsafe_allow_html=True)
 
-                        # Levels
                         t1, t2 = st.columns(2)
                         t1.metric("🛑 Stop-Loss", f"₹{res['stop_loss']}")
                         t1.metric("🚀 Max Target", f"₹{res['max_upside']}")
                         t2.metric("🎯 Target 1", f"₹{res['target_1']}")
                         t2.metric("📈 Gain Room", f"+{res['upside_pct']}%")
 
-                        # Fast Exit Rule Box
                         st.markdown(f"""
                         <div class="exit-box">
                             <b>⚡ WHEN TO SELL FAST:</b> {res['exit_rule']}
                         </div>
                         """, unsafe_allow_html=True)
 
-                        # Click to Fetch News Button
                         if st.button(f"📰 Read {res['symbol']} News", key=f"btn_news_{res['symbol']}"):
-                            st.session_state.selected_news_stock = res["symbol"]
+                            st.session_state.selected_news_symbol = res["symbol"]
 
     # ===== TAB 3: NEWS DRILLDOWN =====
     with tabs[2]:
-        active_news_stock = st.session_state.selected_news_stock if st.session_state.selected_news_stock else "NSE India"
-        st.subheader(f"📰 Live News & Catalyst Feed: {active_news_stock}")
+        active_news = st.session_state.selected_news_symbol if st.session_state.selected_news_symbol else "NSE India"
+        st.subheader(f"📰 Live News & Catalyst Feed: {active_news}")
 
-        news_articles = fetch_company_news(active_news_stock)
-        if not news_articles:
-            st.info(f"No breaking headlines found for {active_news_stock}. Select a stock from Tab 2 to view its company-specific news.")
+        articles = fetch_company_news(active_news)
+        if not articles:
+            st.info(f"No breaking headlines found for {active_news}. Select another stock from the Radar to inspect news.")
         else:
-            for art in news_articles:
+            for art in articles:
                 st.markdown(f"""
                 <div class="news-card">
                     <div style="font-size:15px; font-weight:600; margin-bottom:4px;">
